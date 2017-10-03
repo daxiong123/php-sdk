@@ -6,37 +6,66 @@ use Qiniu\Http\Client;
 use Qiniu\Http\Error;
 use Qiniu\Processing\Operation;
 
+/**
+ * 持久化处理类,该类用于主动触发异步持久化操作.
+ *
+ * @link http://developer.qiniu.com/docs/v6/api/reference/fop/pfop/pfop.html
+ */
 final class PersistentFop
 {
+    /**
+     * @var 账号管理密钥对，Auth对象
+     */
     private $auth;
-    private $bucket;
-    private $pipeline;
-    private $notify_url;
 
-    public function __construct($auth, $bucket, $pipeline = null, $notify_url = null, $force = false)
+    /*
+     * @var 配置对象，Config 对象
+     * */
+    private $config;
+
+
+    public function __construct($auth, $config = null)
     {
         $this->auth = $auth;
-        $this->bucket = $bucket;
-        $this->pipeline = $pipeline;
-        $this->notify_url = $notify_url;
-        $this->force = $force;
+        if ($config == null) {
+            $this->config = new Config();
+        } else {
+            $this->config = $config;
+        }
     }
 
-    public function execute($key, array $fops)
+    /**
+     * 对资源文件进行异步持久化处理
+     * @param $bucket     资源所在空间
+     * @param $key        待处理的源文件
+     * @param $fops       string|array  待处理的pfop操作，多个pfop操作以array的形式传入。
+     *                    eg. avthumb/mp3/ab/192k, vframe/jpg/offset/7/w/480/h/360
+     * @param $pipeline   资源处理队列
+     * @param $notify_url 处理结果通知地址
+     * @param $force      是否强制执行一次新的指令
+     *
+     *
+     * @return array 返回持久化处理的persistentId, 和返回的错误。
+     *
+     * @link http://developer.qiniu.com/docs/v6/api/reference/fop/
+     */
+    public function execute($bucket, $key, $fops, $pipeline = null, $notify_url = null, $force = false)
     {
-        $ops = implode(';', $fops);
-        $params = array('bucket' => $this->bucket, 'key' => $key, 'fops' => $ops);
-        if (!empty($this->pipeline)) {
-            $params['pipeline'] = $this->pipeline;
+        if (is_array($fops)) {
+            $fops = implode(';', $fops);
         }
-        if (!empty($this->notify_url)) {
-            $params['notifyURL'] = $this->notify_url;
-        }
-        if ($this->force) {
+        $params = array('bucket' => $bucket, 'key' => $key, 'fops' => $fops);
+        \Qiniu\setWithoutEmpty($params, 'pipeline', $pipeline);
+        \Qiniu\setWithoutEmpty($params, 'notifyURL', $notify_url);
+        if ($force) {
             $params['force'] = 1;
         }
         $data = http_build_query($params);
-        $url = Config::API_HOST . '/pfop/';
+        $scheme = "http://";
+        if ($this->config->useHTTPS === true) {
+            $scheme = "https://";
+        }
+        $url = $scheme . Config::API_HOST . '/pfop/';
         $headers = $this->auth->authorization($url, $data, 'application/x-www-form-urlencoded');
         $headers['Content-Type'] = 'application/x-www-form-urlencoded';
         $response = Client::post($url, $data, $headers);
@@ -48,72 +77,18 @@ final class PersistentFop
         return array($id, null);
     }
 
-    public static function status($id)
+    public function status($id)
     {
-        $url = Config::API_HOST . "/status/get/prefop?id=$id";
+        $scheme = "http://";
+
+        if ($this->config->useHTTPS === true) {
+            $scheme = "https://";
+        }
+        $url = $scheme . Config::API_HOST . "/status/get/prefop?id=$id";
         $response = Client::get($url);
         if (!$response->ok()) {
             return array(null, new Error($url, $response));
         }
         return array($response->json(), null);
-    }
-
-    public function __call($method, $args)
-    {
-        $key = $args[0];
-        $cmd = $method;
-        $mod = null;
-        if (count($args)>1) {
-            $mod = $args[1];
-        }
-
-        $options = array();
-        if (count($args)>2) {
-            $options = $args[2];
-        }
-
-        $target_bucket = null;
-        if (count($args)>3) {
-            $target_bucket = $args[3];
-        }
-
-        $target_key = null;
-        if (count($args)>4) {
-            $target_key = $args[4];
-        }
-
-        $pfop = Operation::buildOp($cmd, $mod, $options);
-        if ($target_bucket != null) {
-            $pfop = Operation::saveas($pfop, $target_bucket, $target_key);
-        }
-
-        $ops = array();
-        array_push($ops, $pfop);
-        return $this->execute($key, $ops);
-    }
-
-    public function mkzip(
-        $dummy_key,
-        $urls_and_alias,
-        $to_bucket = null,
-        $to_key = null,
-        $mode = 2
-    ) {
-        $base = 'mkzip/' . $mode;
-        $op = array($base);
-        foreach ($urls_and_alias as $key => $value) {
-            if (is_int($key)) {
-                array_push($op, 'url/' . \Qiniu\base64_urlSafeEncode($value));
-            } else {
-                array_push($op, 'url/' . \Qiniu\base64_urlSafeEncode($key));
-                array_push($op, 'alias/' . \Qiniu\base64_urlSafeEncode($key));
-            }
-        }
-        $fop = implode('/', $op);
-        if ($to_bucket != null) {
-            $op = Operation::saveas($fop, $to_bucket, $to_key);
-        }
-        $ops =array($op);
-        return $this->execute($dummy_key, $ops);
     }
 }
